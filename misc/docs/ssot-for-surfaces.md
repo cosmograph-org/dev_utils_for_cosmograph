@@ -45,6 +45,8 @@ These are the questions a surface asks about a parameter. The first four are the
 
 ## A parameter does not mean the same thing in every renderer
 
+**This section is provisional.** It holds if the MCP App surface renders Cosmograph directly inside the app iframe. A nested-iframe route is being tested — a full-Cosmograph embed hosted on its own origin with its own CSP, reached through `frameDomains` and driven over a postMessage bridge — and if that works the MCP surface gets the full library back, `binding: "column"` means one thing again everywhere, and `layer` drops from a correctness requirement to a renderer hint. Do not build a control strategy on this section until that result is in.
+
 There are two renderers, not one, and a surface may not get to choose which it uses.
 
 `@cosmograph/cosmograph` is the full library: it carries duckdb-wasm and the data-kit, and it resolves a column name against the user's data in the browser. `@cosmos.gl/graph` is the engine underneath it, which takes typed arrays and knows nothing about columns or tables.
@@ -99,7 +101,7 @@ Small, additive, one concern each. In the order they are worth doing.
 2. ~~**`binding` per parameter**, derived from the TypeScript type rather than the name.~~ Done in cosmograph#633. Deriving from the type rather than the `By` suffix paid for itself immediately: it catches `pointLabelFn` and `pointLabelWeightFn`, which a suffix rule misses, and it leaves `string | function` unions such as `pointLabelClassName` as `value` so a surface still offers the string.
 3. **`target` and `group`**, from the interface that declares each parameter. `CosmographPointsConfig`, `CosmographLinksConfig`, `SimulationConfig`, `LabelsCosmographConfig`, `BasicConfig`, `CallbackConfig` and cosmos' `GraphConfig` already partition the parameters exactly the way a panel layout wants them; the generator loses that information today by flattening `CosmographConfig` into one property bag.
 4. ~~**`pythonName`**, emitted rather than derived, for the acronym reason above.~~ Done in cosmograph#633.
-5. **`layer`**, `engine` or `library`, from whether the parameter comes from cosmos' `GraphConfig`. Tells a surface whether a control does anything in the renderer it actually uses, which for the MCP App is the engine.
+5. **`layer`**, `engine` or `library`, from whether the parameter comes from cosmos' `GraphConfig`. Worth having either way — it tells a surface which half of the API it is on — but whether it is *load-bearing* depends on the provisional section above. If the MCP surface keeps the full library, this is a hint rather than a correctness requirement.
 6. **`reactive`**, which needs a decision from the JS side before the generator can do anything: there is no machine-readable marker for init-only parameters today, only prose. The cheapest fix is a JSDoc tag — `@initOnly` — on the parameters that cannot go through `setConfig`. Until that exists the generator should emit nothing rather than a guess, and surfaces should treat a missing `reactive` as unknown rather than as `true`.
 
 Everything except `reactive` is derivable from what the TypeScript already says. `reactive` is a request to the library, not to the generator, and should be raised as such.
