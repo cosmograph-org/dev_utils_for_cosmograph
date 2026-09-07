@@ -41,19 +41,23 @@ These are the questions a surface asks about a parameter. The first four are the
 
 **`pythonName`.** The snake_case name, emitted as of cosmograph#633. Mechanical from camelCase — except where it is not: `showFPSMonitor` is `show_fps_monitor`, and a naive regex produces `show_f_p_s_monitor`. That is one exception out of 125 today, which is exactly the kind of ratio that gets a hand-rolled converter shipped and then quietly broken by the second acronym.
 
-**`layer` — engine or library?** Which renderer implements the parameter, and the field that says whether a control will do anything at all in the surface you are building. Not emitted yet; see the proposed changes below.
+**`layer` — engine or library?** Which renderer implements the parameter. Only matters to a surface that falls back to the engine; not emitted yet. See the renderer section below.
 
-## A parameter does not mean the same thing in every renderer
-
-There are two renderers, not one, and a surface may not get to choose which it uses.
+## Two renderers, and which one a surface gets
 
 `@cosmograph/cosmograph` is the full library: it carries duckdb-wasm and the data-kit, and it resolves a column name against the user's data in the browser. `@cosmos.gl/graph` is the engine underneath it, which takes typed arrays and knows nothing about columns or tables.
 
-The MCP App surface is forced onto the engine. Under the Content Security Policy the MCP Apps specification tells hosts to apply, blob-backed Workers are refused — `worker-src` is unset, so it falls back to `script-src`, which does not allow `blob:` — and `WebAssembly.instantiate` is refused because `'unsafe-eval'` is not granted. duckdb-wasm needs both, and the CSP declaration a resource can request has no field for either, so this is structural rather than a configuration mistake. The engine has no wasm and no workers and runs there unchanged.
+All four surfaces run the full library, so `binding: "column"` means the same thing everywhere: the name of a column, resolved by the library. Build your control strategy on that.
 
-The consequence for anything generated from this SSOT is that `binding: "column"` means two different things depending on the renderer. On the library, `pointColorBy` is a column name and the library resolves it. On the engine, the same visual result is a `Float32Array` the surface has to compute itself, in Python, before it hands anything over. A surface that generates a column picker from `binding` alone and then renders on the engine produces a control that silently does nothing — the same failure mode as an init-only parameter treated as reactive, and just as hard for a user to tell from a bug in their data.
+That was not obvious for the MCP App, and the way it was settled is worth recording. Under the Content Security Policy the MCP Apps specification tells hosts to apply, blob-backed Workers are refused — `worker-src` is unset, so it falls back to `script-src`, which does not allow `blob:` — and `WebAssembly.instantiate` is refused because `'unsafe-eval'` is not granted. duckdb-wasm needs both, so the library cannot run *directly in the app view*. It can run one frame down: a nested iframe served from its own origin gets that origin's headers rather than the host's, reached through `frameDomains` and driven over a postMessage bridge. Verified under the strictest sandbox, opaque origin and `allow-scripts` only — duckdb-wasm initialised, points and links rendered.
 
-`layer` is what closes that, and the partition exists in exactly one place: `CosmographConfig` extends `Omit<GraphConfig, ...>` from cosmos, so generating a schema for cosmos' `GraphConfig` alone marks the engine half precisely. Nobody downstream can reconstruct it.
+The engine remains a fallback for that surface, for the offline case. If you support that fallback, know that the same parameter changes meaning across it: on the library `pointColorBy` is a column name, on the engine it is a `Float32Array` you have to compute yourself before handing anything over. `layer` — engine or library — is the field that would tell you which controls are dead on the fallback, and it is worth having for that reason alone, but it is a renderer hint rather than something every surface has to branch on.
+
+Two consequences of the nested-iframe route that reach back into this SSOT.
+
+An opaque origin makes *every* fetch the embed performs cross-origin, including fetches back to its own host, so a CDN import fails CORS. The embed has to self-host its bundle — esbuild over `@cosmograph/cosmograph` into a single ESM file — which means the embed pins one exact library version.
+
+That is what makes the `version` field load-bearing rather than a courtesy. A surface holds two things that must agree: the params SSOT it generated its controls from, and the library version its embed actually runs. Without a version on the document there is no way to notice when they diverge, and the symptom of divergence is a control that sets a parameter the running library has never heard of.
 
 One shape detail while you are writing example calls: `new Cosmograph(el, config)` takes a required config — omitting it throws — and `prepareCosmographData` takes a nested `{ points: {...}, links: {...} }` preparation config, not a flat `CosmographConfig`.
 
@@ -97,9 +101,9 @@ Small, additive, one concern each. In the order they are worth doing.
 
 1. ~~**`version` on the document.**~~ Done in cosmograph#633, taken from `packages/cosmograph/package.json`.
 2. ~~**`binding` per parameter**, derived from the TypeScript type rather than the name.~~ Done in cosmograph#633. Deriving from the type rather than the `By` suffix paid for itself immediately: it catches `pointLabelFn` and `pointLabelWeightFn`, which a suffix rule misses, and it leaves `string | function` unions such as `pointLabelClassName` as `value` so a surface still offers the string.
-3. **`target` and `group`**, from the interface that declares each parameter. `CosmographPointsConfig`, `CosmographLinksConfig`, `SimulationConfig`, `LabelsCosmographConfig`, `BasicConfig`, `CallbackConfig` and cosmos' `GraphConfig` already partition the parameters exactly the way a panel layout wants them; the generator loses that information today by flattening `CosmographConfig` into one property bag.
+3. **`layer`**, `engine` or `library`, from whether the parameter comes from cosmos' `GraphConfig`. A renderer hint: it tells a surface which controls are dead if it falls back to the engine. Cheap to emit, since the partition is `CosmographConfig extends Omit<GraphConfig, ...>` and nothing downstream can reconstruct it.
 4. ~~**`pythonName`**, emitted rather than derived, for the acronym reason above.~~ Done in cosmograph#633.
-5. **`layer`**, `engine` or `library`, from whether the parameter comes from cosmos' `GraphConfig`. Tells a surface whether a control does anything in the renderer it actually uses, which for the MCP App is the engine.
+5. **`target` and `group`**, from the interface that declares each parameter. `CosmographPointsConfig`, `CosmographLinksConfig`, `SimulationConfig`, `LabelsCosmographConfig`, `BasicConfig`, `CallbackConfig` and cosmos' `GraphConfig` already partition the parameters exactly the way a panel layout wants them; the generator loses that information today by flattening `CosmographConfig` into one property bag.
 6. **`reactive`**, which needs a decision from the JS side before the generator can do anything: there is no machine-readable marker for init-only parameters today, only prose. The cheapest fix is a JSDoc tag — `@initOnly` — on the parameters that cannot go through `setConfig`. Until that exists the generator should emit nothing rather than a guess, and surfaces should treat a missing `reactive` as unknown rather than as `true`.
 
 Everything except `reactive` is derivable from what the TypeScript already says. `reactive` is a request to the library, not to the generator, and should be raised as such.
