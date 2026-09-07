@@ -12,13 +12,15 @@ The parameter SSOT is generated from Cosmograph's TypeScript sources by `pnpm ru
 
 **Stability contract.** Fields are added, not renamed or removed, without a note in this document. The generator runs in the cosmograph repo's CI: `tests/unit/params-ssot.test.ts` regenerates the artifact in memory and fails the build when the committed copy no longer matches its TypeScript sources, so a silent drift is not possible. What *is* possible is an intentional upstream change — a parameter renamed, a default moved — landing between two versions you pinned.
 
-**Versioning is the one gap in that contract today.** The document carries `$id`, `title`, `description` and a `source` block naming the TypeScript files it came from, but no version. Until that is fixed, the only version handle is the npm package version you fetched it from. Adding a `version` field is the first item in the proposed generator changes below.
+**Versioning.** The document carries `$id`, `title`, `description`, a `source` block naming the TypeScript files it came from, and — as of cosmograph#633 — a `version` taken from the package version. Pin against that. Before #633 lands, the only version handle is the npm package version you fetched the file from.
 
 ## What every surface needs, per parameter
 
 These are the questions a surface asks about a parameter. The first four are the ones that decide what widget to render at all; the rest decide how to render it.
 
-**`binding` — what kind of thing is this?** The load-bearing field, and the one no surface should have to infer. Four values:
+**`binding` — what kind of thing is this?** The load-bearing field, and the one no surface should have to infer. Emitted as of cosmograph#633, derived from the TypeScript *type* rather than the name. Five values:
+
+- `data` — the `points` or `links` table itself. Not a control at all; this is where the user's dataframe goes.
 
 - `column` — the parameter takes the *name of a column* in the user's data. `pointColorBy`, `linkSourceBy`, `pointXBy`. The surface renders a column picker populated from the loaded dataframe, not a text box. There are 23 of these plus the two `*IncludeColumns` list parameters.
 - `value` — the parameter takes a literal. `pointSizeScale`, `backgroundColor`, `simulationRepulsion`. The control comes from the JSON-Schema type fragment: boolean → switch, enum → select, number → slider or number input, string with a colour-shaped description → colour picker.
@@ -37,7 +39,23 @@ These are the questions a surface asks about a parameter. The first four are the
 
 **Description.** Present for nearly every parameter, taken from the TypeScript JSDoc. It is written for a developer reading an IDE tooltip, so it is accurate but often mentions the camelCase name of a sibling parameter. A surface showing it to an end user should expect that.
 
-**`pythonName`.** The snake_case name. Mechanical from camelCase — except where it is not: `showFPSMonitor` is `show_fps_monitor`, and a naive regex produces `show_f_p_s_monitor`. That is one exception out of 125 today, which is exactly the kind of ratio that gets a hand-rolled converter shipped and then quietly broken by the second acronym. Emit it rather than derive it.
+**`pythonName`.** The snake_case name, emitted as of cosmograph#633. Mechanical from camelCase — except where it is not: `showFPSMonitor` is `show_fps_monitor`, and a naive regex produces `show_f_p_s_monitor`. That is one exception out of 125 today, which is exactly the kind of ratio that gets a hand-rolled converter shipped and then quietly broken by the second acronym.
+
+**`layer` — engine or library?** Which renderer implements the parameter, and the field that says whether a control will do anything at all in the surface you are building. Not emitted yet; see the proposed changes below.
+
+## A parameter does not mean the same thing in every renderer
+
+There are two renderers, not one, and a surface may not get to choose which it uses.
+
+`@cosmograph/cosmograph` is the full library: it carries duckdb-wasm and the data-kit, and it resolves a column name against the user's data in the browser. `@cosmos.gl/graph` is the engine underneath it, which takes typed arrays and knows nothing about columns or tables.
+
+The MCP App surface is forced onto the engine. Under the Content Security Policy the MCP Apps specification tells hosts to apply, blob-backed Workers are refused — `worker-src` is unset, so it falls back to `script-src`, which does not allow `blob:` — and `WebAssembly.instantiate` is refused because `'unsafe-eval'` is not granted. duckdb-wasm needs both, and the CSP declaration a resource can request has no field for either, so this is structural rather than a configuration mistake. The engine has no wasm and no workers and runs there unchanged.
+
+The consequence for anything generated from this SSOT is that `binding: "column"` means two different things depending on the renderer. On the library, `pointColorBy` is a column name and the library resolves it. On the engine, the same visual result is a `Float32Array` the surface has to compute itself, in Python, before it hands anything over. A surface that generates a column picker from `binding` alone and then renders on the engine produces a control that silently does nothing — the same failure mode as an init-only parameter treated as reactive, and just as hard for a user to tell from a bug in their data.
+
+`layer` is what closes that, and the partition exists in exactly one place: `CosmographConfig` extends `Omit<GraphConfig, ...>` from cosmos, so generating a schema for cosmos' `GraphConfig` alone marks the engine half precisely. Nobody downstream can reconstruct it.
+
+One shape detail while you are writing example calls: `new Cosmograph(el, config)` takes a required config — omitting it throws — and `prepareCosmographData` takes a nested `{ points: {...}, links: {...} }` preparation config, not a flat `CosmographConfig`.
 
 ## The event and output side
 
@@ -77,13 +95,14 @@ Which parameters are *required* is machine-readable in `packages/cosmograph/src/
 
 Small, additive, one concern each. In the order they are worth doing.
 
-1. **`version` on the document.** Take it from `packages/cosmograph/package.json`. Without it there is no way for a surface to say "I need SSOT >= x", which is the whole point of having a contract.
-2. **`binding` per parameter**, derived from the TypeScript type rather than the name. A parameter whose resolved schema is a function type (the generator already marks these with a `$comment` containing `=>`) is `event` if it is declared in `CallbackConfig` and `function` otherwise. A parameter declared in the points/links config-keys objects whose type is `string` and whose key names a column is `column`. Everything else is `value`. Deriving from the type rather than the `By` suffix is the point: the suffix is a convention, and conventions are what break.
+1. ~~**`version` on the document.**~~ Done in cosmograph#633, taken from `packages/cosmograph/package.json`.
+2. ~~**`binding` per parameter**, derived from the TypeScript type rather than the name.~~ Done in cosmograph#633. Deriving from the type rather than the `By` suffix paid for itself immediately: it catches `pointLabelFn` and `pointLabelWeightFn`, which a suffix rule misses, and it leaves `string | function` unions such as `pointLabelClassName` as `value` so a surface still offers the string.
 3. **`target` and `group`**, from the interface that declares each parameter. `CosmographPointsConfig`, `CosmographLinksConfig`, `SimulationConfig`, `LabelsCosmographConfig`, `BasicConfig`, `CallbackConfig` and cosmos' `GraphConfig` already partition the parameters exactly the way a panel layout wants them; the generator loses that information today by flattening `CosmographConfig` into one property bag.
-4. **`pythonName`**, emitted rather than derived, for the acronym reason above.
-5. **`reactive`**, which needs a decision from the JS side before the generator can do anything: there is no machine-readable marker for init-only parameters today, only prose. The cheapest fix is a JSDoc tag — `@initOnly` — on the parameters that cannot go through `setConfig`. Until that exists the generator should emit nothing rather than a guess, and surfaces should treat a missing `reactive` as unknown rather than as `true`.
+4. ~~**`pythonName`**, emitted rather than derived, for the acronym reason above.~~ Done in cosmograph#633.
+5. **`layer`**, `engine` or `library`, from whether the parameter comes from cosmos' `GraphConfig`. Tells a surface whether a control does anything in the renderer it actually uses, which for the MCP App is the engine.
+6. **`reactive`**, which needs a decision from the JS side before the generator can do anything: there is no machine-readable marker for init-only parameters today, only prose. The cheapest fix is a JSDoc tag — `@initOnly` — on the parameters that cannot go through `setConfig`. Until that exists the generator should emit nothing rather than a guess, and surfaces should treat a missing `reactive` as unknown rather than as `true`.
 
-The first four are derivable from what the TypeScript already says. The fifth is a request to the library, not to the generator, and should be raised as such.
+Everything except `reactive` is derivable from what the TypeScript already says. `reactive` is a request to the library, not to the generator, and should be raised as such.
 
 ## Where this fits
 
