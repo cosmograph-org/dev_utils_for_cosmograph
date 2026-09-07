@@ -53,11 +53,15 @@ That was not obvious for the MCP App, and the way it was settled is worth record
 
 The engine remains a fallback for that surface, for the offline case. If you support that fallback, know that the same parameter changes meaning across it: on the library `pointColorBy` is a column name, on the engine it is a `Float32Array` you have to compute yourself before handing anything over. `layer` — engine or library — is the field that would tell you which controls are dead on the fallback, and it is worth having for that reason alone, but it is a renderer hint rather than something every surface has to branch on.
 
+**Read `layer` carefully, because the natural misreading is the harmful one.** `layer: "engine"` means *implemented at the engine layer*, and therefore **live in both renderers**. `layer: "library"` means library-only, and therefore dead on the engine fallback. The trap is that `"engine"` scans as "engine-only", so the obvious line — `if (layer === 'engine') skip` — disables the roughly hundred parameters that work everywhere and keeps the ones that do not. If you only ever ask "will this control silently do nothing on the fallback?", the answer is `layer === 'library'`.
+
 Two consequences of the nested-iframe route that reach back into this SSOT.
 
 An opaque origin makes *every* fetch the embed performs cross-origin, including fetches back to its own host, so a CDN import fails CORS. The embed has to self-host its bundle — esbuild over `@cosmograph/cosmograph` into a single ESM file — which means the embed pins one exact library version.
 
-That is what makes the `version` field load-bearing rather than a courtesy. A surface holds two things that must agree: the params SSOT it generated its controls from, and the library version its embed actually runs. Without a version on the document there is no way to notice when they diverge, and the symptom of divergence is a control that sets a parameter the running library has never heard of.
+That is what makes the `version` field load-bearing rather than a courtesy. A surface holds two things that must agree: the params SSOT it generated its controls from, and the library version its embed actually runs. They are pinned by different mechanisms — one by the artifact you vendored, the other by whatever bundle got built into the embed — and nothing else in the system notices when they drift. The symptom is a control that sets a parameter the running library has never heard of, and it produces no error anywhere: no exception, no console warning, just a knob that does nothing.
+
+That is the third of three silent no-ops this document is trying to design away. A wrong `reactive` gives you a live control that does nothing until a remount. A misread `layer` gives you a control that does nothing on the fallback renderer. A stale SSOT gives you a control for a parameter that no longer exists. None of the three announces itself, and a user reports all three as "your tool is broken".
 
 One shape detail while you are writing example calls: `new Cosmograph(el, config)` takes a required config — omitting it throws — and `prepareCosmographData` takes a nested `{ points: {...}, links: {...} }` preparation config, not a flat `CosmographConfig`.
 
@@ -87,7 +91,9 @@ Which parameters are *required* is machine-readable in `packages/cosmograph/src/
 
 ## What each surface actually does with this
 
-**Streamlit.** One render pass, no persistent instance; the whole config is rebuilt from Python on every interaction. Needs `binding` to decide picker versus control, `group` and `target` to lay out the sidebar, and `reactive` least of all — everything is a re-render anyway. Needs the event bridge most, because Streamlit's model is that the component returns a value.
+**Streamlit.** One render pass, no persistent instance; the whole config is rebuilt from Python on every interaction. Needs `binding` to decide picker versus control, `group` and `target` to lay out the sidebar, and the event bridge most of all, because Streamlit's model is that the component returns a value.
+
+`reactive` matters here for a reason that is not obvious from the rerun model. A Streamlit component iframe is *not* remounted on a rerun whose component arguments are unchanged — verified by watching the embed's boot timestamp stay byte-identical across reruns triggered by an unrelated widget. It **is** remounted when the arguments change, and a remount costs a full duckdb-wasm re-initialisation of roughly 700ms plus the loss of simulation state and camera position. So on any host with a rerun model, never encode configuration in the component's arguments: keep the arguments constant and push configuration through a side channel. The SSOT cannot express that constraint, but it is what decides whether a control that says it is live actually feels live.
 
 **Dash.** Callback-driven, with a long-lived component. `reactive` matters here: a parameter that can only be set at construction must either be excluded from the live controls or trigger a re-mount, and getting that wrong looks like a control that silently does nothing. That is the single worst failure mode for a generated UI, because the user cannot tell it from a bug in their data.
 
