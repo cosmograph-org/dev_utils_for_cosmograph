@@ -27,7 +27,7 @@ These are the questions a surface asks about a parameter. The first four are the
 - `function` — the parameter takes a JavaScript callback that computes a value per row: the seven `*ByFn` accessors (`pointColorByFn`, `linkWidthByFn`, and so on). **A surface must skip these deliberately and visibly**, not drop them silently. A Python or MCP surface cannot serialise a JS closure; a user who came looking for `pointColorByFn` deserves to be told it is JS-only and pointed at `pointColorBy` plus `pointColorByMap`.
 - `event` — the parameter is an *output*, not an input: the 40 `on*` callbacks. Rendering one as a control is always a bug. These belong to the event side, described further down.
 
-**`target` — `point`, `link`, or `global`.** Panel grouping. Trivial for the generator to know and guessy for a consumer to reconstruct.
+**`target` — `point`, `link`, or `global`.** Panel grouping. Not emitted, and not for want of trying — see the proposed changes below for what the TypeScript does and does not say.
 
 **`group` — `styling`, `simulation`, `labels`, `layout`, `interaction`, `data`.** Ordering within a panel. A surface that renders 228 controls in declaration order is unusable; a surface that renders six labelled sections is not.
 
@@ -41,7 +41,7 @@ These are the questions a surface asks about a parameter. The first four are the
 
 **`pythonName`.** The snake_case name, emitted as of cosmograph#633. Mechanical from camelCase — except where it is not: `showFPSMonitor` is `show_fps_monitor`, and a naive regex produces `show_f_p_s_monitor`. That is one exception out of 125 today, which is exactly the kind of ratio that gets a hand-rolled converter shipped and then quietly broken by the second acronym.
 
-**`layer` — engine or library?** Which renderer implements the parameter. Only matters to a surface that falls back to the engine; not emitted yet. See the renderer section below.
+**`layer` — engine or library?** Which renderer implements the parameter, emitted as of cosmograph#634. `engine` means implemented at the engine layer and therefore live in both renderers; `library` means dead on the engine fallback. Only matters to a surface that supports that fallback. See the renderer section below.
 
 ## Two renderers, and which one a surface gets
 
@@ -64,6 +64,8 @@ That is what makes the `version` field load-bearing rather than a courtesy. A su
 That is the third of three silent no-ops this document is trying to design away. A wrong `reactive` gives you a live control that does nothing until a remount. A misread `layer` gives you a control that does nothing on the fallback renderer. A stale SSOT gives you a control for a parameter that no longer exists. None of the three announces itself, and a user reports all three as "your tool is broken".
 
 One shape detail while you are writing example calls: `new Cosmograph(el, config)` takes a required config — omitting it throws — and `prepareCosmographData` takes a nested `{ points: {...}, links: {...} }` preparation config, not a flat `CosmographConfig`.
+
+One invariant is worth coding against, and worth keeping as a test wherever this file is regenerated: **every parameter with `binding: "column"` has `layer: "library"`**, and so do both `data` inputs. The engine takes typed arrays and has no notion of a column, so this falls straight out of a correct partition — all 27 of them, with no special-casing. It is also the check that catches the silent derivation failure above, since an empty engine set would mark everything `library` and this invariant would still hold, but the 112 `engine` parameters would vanish. Assert both halves: the invariant, and that the engine set is not empty.
 
 ## The event and output side
 
@@ -107,12 +109,14 @@ Small, additive, one concern each. In the order they are worth doing.
 
 1. ~~**`version` on the document.**~~ Done in cosmograph#633, taken from `packages/cosmograph/package.json`.
 2. ~~**`binding` per parameter**, derived from the TypeScript type rather than the name.~~ Done in cosmograph#633. Deriving from the type rather than the `By` suffix paid for itself immediately: it catches `pointLabelFn` and `pointLabelWeightFn`, which a suffix rule misses, and it leaves `string | function` unions such as `pointLabelClassName` as `value` so a surface still offers the string.
-3. **`layer`**, `engine` or `library`, from whether the parameter comes from cosmos' `GraphConfig`. A renderer hint: it tells a surface which controls are dead if it falls back to the engine. Cheap to emit, since the partition is `CosmographConfig extends Omit<GraphConfig, ...>` and nothing downstream can reconstruct it.
+3. ~~**`layer`**, `engine` or `library`.~~ Done in cosmograph#634: 112 engine, 116 library. One derivation trap worth repeating, because it fails silently — cosmos' `GraphConfig` resolves through `Partial<GraphConfigInterface>`, so reading `definitions.GraphConfig.properties` gives zero properties, an empty engine set, and every parameter marked `library`. That validates, tests green, and reads as a plausible fact about the API. The defence is the invariant below rather than the lookup.
 4. ~~**`pythonName`**, emitted rather than derived, for the acronym reason above.~~ Done in cosmograph#633.
-5. **`target` and `group`**, from the interface that declares each parameter. `CosmographPointsConfig`, `CosmographLinksConfig`, `SimulationConfig`, `LabelsCosmographConfig`, `BasicConfig`, `CallbackConfig` and cosmos' `GraphConfig` already partition the parameters exactly the way a panel layout wants them; the generator loses that information today by flattening `CosmographConfig` into one property bag.
-6. **`reactive`**, which needs a decision from the JS side before the generator can do anything: there is no machine-readable marker for init-only parameters today, only prose. The cheapest fix is a JSDoc tag — `@initOnly` — on the parameters that cannot go through `setConfig`. Until that exists the generator should emit nothing rather than a guess, and surfaces should treat a missing `reactive` as unknown rather than as `true`.
+5. **`target` and `group`** cannot be derived from the TypeScript as it stands, and I would rather say so than ship a guess. Measured: the declaring interfaces do partition the cosmograph-side parameters usefully — `CosmographPointsConfig` 27, `CosmographLinksConfig` 22, `LabelsCosmographConfig` 30, `SimulationConfig` 10, `SimulationEventConfig` 6, `BasicConfig` 24, `CallbackConfig` 11 — but 112 of the 228 come from cosmos' `GraphConfig`, which is one undifferentiated bucket of 115 covering styling, layout, interaction and simulation alike. Falling back to the name for those is wrong in ways that do not announce themselves: `focusedLinkIndex`, `curvedLinkSegments`, `scaleLinksOnZoom` and `renderLinks` are all link parameters that neither an interface nor a `link` prefix catches. The mechanism is cheap — all nine interface schemas come out of one reused generator in under a second — so what is missing is the semantics, not the plumbing.
+6. **`reactive`**, likewise: there is no machine-readable marker for init-only parameters, only prose. Until one exists the generator should emit nothing rather than a guess, and surfaces should treat a missing `reactive` as unknown rather than as `true`.
 
-Everything except `reactive` is derivable from what the TypeScript already says. `reactive` is a request to the library, not to the generator, and should be raised as such.
+The first three are derivable from what the TypeScript already says, and are done. The last two are not, and they are the same ask rather than two: **three JSDoc tags on the config interfaces** would close all of it — `@group` and `@target` for panel placement, `@initOnly` for the parameters that cannot go through `setConfig`. That is a request to the library, not to the generator. Every one of them is a tag on a property that already has a JSDoc comment; the generator already reads those comments, so nothing else would have to change.
+
+It is worth being blunt about why this matters more than panel tidiness. Grouping being wrong makes a UI ugly. `reactive` being wrong makes a control silently do nothing — the same failure class as a misread `layer` or a stale SSOT, and the one users report as the tool being broken.
 
 ## Where this fits
 
